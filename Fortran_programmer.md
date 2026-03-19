@@ -193,6 +193,8 @@ subroutine run_simulation(mesh, state, config, output)
 - Self-documenting — related data is grouped
 - Simpler call sites
 
+**Performance note:** Derived type indirection introduces a small overhead from pointer chasing and potential cache misses. For performance-critical compute kernels called millions of times (e.g., flux calculations in RK2 substeps), explicit scalar/array arguments are acceptable. These hot kernels are typically stable and rarely modified, so the maintainability trade-off is worthwhile.
+
 ---
 
 ## Forbidden Practices
@@ -290,21 +292,28 @@ use my_module, only: my_function
 
 ### No Implicit SAVE
 
-Avoid module-level variables that retain state:
+Avoid module-level variables that retain state without explicit marking:
 
 ```fortran
 ! Bad — implicit save, hidden state
 module bad_module
-   integer :: call_count = 0    ! Retains value between calls
+   integer :: call_count = 0    ! Retains value between calls (implicit save)
 end module
 
-! Good — explicit state management
+! Good — explicit state management via types
 module good_module
    type :: counter_t
       integer :: value = 0
    end type
 end module
+
+! Acceptable — explicit save keyword makes intent clear
+module acceptable_module
+   integer, save :: call_count = 0    ! Clearly marked as persistent
+end module
 ```
+
+If you must use module-level state, use the explicit `save` keyword to signal intent to readers. However, prefer encapsulating state in derived types passed as arguments.
 
 ---
 
@@ -432,6 +441,8 @@ kinetic = 0.5_wp * state%water_depth * &
           (state%velocity_x**2 + state%velocity_y**2)
 ```
 
+**Compiler caveat:** `associate` support varies across compilers and can produce unexpected behavior (aliasing issues, optimization failures). Flang tends to have the most robust support. Test thoroughly when using `associate` in performance-critical code, and consider falling back to explicit temporaries if you encounter issues with gfortran or nvfortran.
+
 ### No Magic Numbers
 
 Use named constants:
@@ -502,22 +513,35 @@ character(len=80) :: error_msg
 
 ### Memory Management
 
-Provide cleanup procedures for types with allocatable components:
+For types with allocatable components, Fortran automatically deallocates when the object goes out of scope — explicit destroy routines are generally unnecessary for non-GPU code (pointers are the exception and require manual cleanup).
+
+Use `block` constructs to control deallocation timing:
 
 ```fortran
-type :: workspace_t
-   real(wp), allocatable :: buffer(:)
-   real(wp), allocatable :: matrix(:,:)
-contains
-   procedure :: destroy => workspace_destroy
-end type
+subroutine process_large_data(input)
+   real(wp), intent(in) :: input(:)
 
-subroutine workspace_destroy(self)
-   class(workspace_t), intent(inout) :: self
-   if (allocated(self%buffer)) deallocate(self%buffer)
-   if (allocated(self%matrix)) deallocate(self%matrix)
+   ! Large workspace deallocated at end of block, not end of subroutine
+   block
+      type :: workspace_t
+         real(wp), allocatable :: buffer(:)
+         real(wp), allocatable :: matrix(:,:)
+      end type
+
+      type(workspace_t) :: work
+      allocate(work%buffer(1000000))
+      allocate(work%matrix(1000, 1000))
+      ! ... use workspace ...
+   end block   ! work deallocated here
+
+   ! Continue with other operations, memory already freed
 end subroutine
 ```
+
+**When explicit destroy is needed:**
+- Types containing pointers (no automatic cleanup)
+- GPU memory management (OpenACC `!$acc exit data`, CUDA Fortran device arrays)
+- Resources requiring ordered cleanup (file handles, MPI communicators)
 
 ### Do Concurrent (Use with Caution because of compiler portability)
 
