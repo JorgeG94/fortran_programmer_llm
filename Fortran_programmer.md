@@ -82,6 +82,45 @@ real(wp) :: E              ! Single letter (except loop indices)
 - Very local, obvious variables (`x`, `y`, `z` for coordinates)
 - Mathematical formulas matching published notation
 
+### Function and Subroutine Naming
+
+Use verb + noun patterns for procedures:
+
+```fortran
+! Good — verb + noun, clear action
+subroutine compute_flux(...)
+subroutine apply_boundary_conditions(...)
+function calculate_timestep(...) result(dt)
+
+! For logical returns, use is_/has_/can_ prefixes
+function is_dry(depth) result(dry)
+function has_converged(residual, tol) result(converged)
+function can_coarsen(cell) result(ok)
+
+! Bad — unclear what it does
+subroutine flux(...)           ! Noun only
+subroutine boundary(...)       ! What about the boundary?
+function timestep(...)         ! Is this getting or setting?
+```
+
+### Units in Comments
+
+For scientific code, document physical units in variable declarations:
+
+```fortran
+type :: state_t
+   real(wp) :: depth       !! Water depth [m]
+   real(wp) :: velocity_x  !! x-velocity [m/s]
+   real(wp) :: velocity_y  !! y-velocity [m/s]
+   real(wp) :: pressure    !! Pressure [Pa]
+end type
+
+real(wp), parameter :: GRAVITY = 9.81_wp      ! [m/s^2]
+real(wp), parameter :: WATER_DENSITY = 1000.0_wp  ! [kg/m^3]
+```
+
+This is especially valuable when combining quantities — makes dimensional analysis obvious.
+
 ### Constants
 
 Use UPPERCASE with underscores for parameters:
@@ -146,6 +185,29 @@ subroutine compute_flux(state, dt, flux)
    real(wp) :: flux(:,:)
 ```
 
+### Functions Should Have No Side Effects
+
+Functions should be pure computations — all arguments `intent(in)`, no mutations:
+
+```fortran
+! Good — pure computation, no side effects
+function kinetic_energy(mass, velocity) result(ke)
+   real(wp), intent(in) :: mass, velocity
+   real(wp) :: ke
+   ke = 0.5_wp * mass * velocity**2
+end function
+
+! Bad — function mutates state (use a subroutine instead)
+function update_and_return_energy(state) result(energy)
+   type(state_t), intent(inout) :: state    ! Side effect!
+   real(wp) :: energy
+   state%step = state%step + 1              ! Mutation hidden in function
+   energy = compute_energy(state)
+end function
+```
+
+Use subroutines when you need to modify arguments. Functions that mutate state are surprising and error-prone.
+
 ### Private by Default
 
 Modules should be `private` by default with explicit `public` declarations:
@@ -192,6 +254,8 @@ subroutine run_simulation(mesh, state, config, output)
 - Easier to add new parameters without changing signatures
 - Self-documenting — related data is grouped
 - Simpler call sites
+
+**Performance note:** Derived type indirection introduces a small overhead from pointer chasing and potential cache misses. For performance-critical compute kernels called millions of times (e.g., flux calculations in RK2 substeps), explicit scalar/array arguments are acceptable. These hot kernels are typically stable and rarely modified, so the maintainability trade-off is worthwhile.
 
 ---
 
@@ -290,21 +354,28 @@ use my_module, only: my_function
 
 ### No Implicit SAVE
 
-Avoid module-level variables that retain state:
+Avoid module-level variables that retain state without explicit marking:
 
 ```fortran
 ! Bad — implicit save, hidden state
 module bad_module
-   integer :: call_count = 0    ! Retains value between calls
+   integer :: call_count = 0    ! Retains value between calls (implicit save)
 end module
 
-! Good — explicit state management
+! Good — explicit state management via types
 module good_module
    type :: counter_t
       integer :: value = 0
    end type
 end module
+
+! Acceptable — explicit save keyword makes intent clear
+module acceptable_module
+   integer, save :: call_count = 0    ! Clearly marked as persistent
+end module
 ```
+
+If you must use module-level state, use the explicit `save` keyword to signal intent to readers. However, prefer encapsulating state in derived types passed as arguments.
 
 ---
 
@@ -432,6 +503,8 @@ kinetic = 0.5_wp * state%water_depth * &
           (state%velocity_x**2 + state%velocity_y**2)
 ```
 
+**Compiler caveat:** `associate` support varies across compilers and can produce unexpected behavior (aliasing issues, optimization failures). Flang tends to have the most robust support. Test thoroughly when using `associate` in performance-critical code, and consider falling back to explicit temporaries if you encounter issues with gfortran or nvfortran.
+
 ### No Magic Numbers
 
 Use named constants:
@@ -483,6 +556,23 @@ do i = 1, n
 end do
 ```
 
+### Labeled Loops for cycle/exit (Optional)
+
+When using `cycle` or `exit` with nested loops, labels make control flow explicit:
+
+```fortran
+outer: do i = 1, n
+   inner: do j = 1, m
+      if (found(i, j)) exit outer      ! Clear: exits the outer loop
+      if (skip_column(j)) cycle inner  ! Clear: skips to next j
+   end do inner
+end do outer
+```
+
+Without labels, `exit` and `cycle` apply to the innermost loop, which can be confusing in deeply nested code.
+
+**Style note:** Labeled loops are controversial — some programmers find them ugly and prefer restructuring the code to avoid the need for multi-level `cycle`/`exit`. However, they're useful when the alternative is convoluted logic or flag variables. Use your judgment.
+
 ### Allocatable Character Strings
 
 Use allocatable strings for dynamic content:
@@ -502,22 +592,35 @@ character(len=80) :: error_msg
 
 ### Memory Management
 
-Provide cleanup procedures for types with allocatable components:
+For types with allocatable components, Fortran automatically deallocates when the object goes out of scope — explicit destroy routines are generally unnecessary for non-GPU code (pointers are the exception and require manual cleanup).
+
+Use `block` constructs to control deallocation timing:
 
 ```fortran
-type :: workspace_t
-   real(wp), allocatable :: buffer(:)
-   real(wp), allocatable :: matrix(:,:)
-contains
-   procedure :: destroy => workspace_destroy
-end type
+subroutine process_large_data(input)
+   real(wp), intent(in) :: input(:)
 
-subroutine workspace_destroy(self)
-   class(workspace_t), intent(inout) :: self
-   if (allocated(self%buffer)) deallocate(self%buffer)
-   if (allocated(self%matrix)) deallocate(self%matrix)
+   ! Large workspace deallocated at end of block, not end of subroutine
+   block
+      type :: workspace_t
+         real(wp), allocatable :: buffer(:)
+         real(wp), allocatable :: matrix(:,:)
+      end type
+
+      type(workspace_t) :: work
+      allocate(work%buffer(1000000))
+      allocate(work%matrix(1000, 1000))
+      ! ... use workspace ...
+   end block   ! work deallocated here
+
+   ! Continue with other operations, memory already freed
 end subroutine
 ```
+
+**When explicit destroy is needed:**
+- Types containing pointers (no automatic cleanup)
+- GPU memory management (OpenACC `!$acc exit data`, CUDA Fortran device arrays)
+- Resources requiring ordered cleanup (file handles, MPI communicators)
 
 ### Do Concurrent (Use with Caution because of compiler portability)
 
@@ -821,6 +924,104 @@ end module module_name
 | **Memory** | `allocatable` | `pointer` (unless needed) |
 | **Output** | Logging framework | `print *` |
 | **Control** | `if/select/do` | `goto` |
+
+---
+
+## Common LLM/AI Mistakes
+
+When using AI assistants for Fortran code generation, watch for these common errors:
+
+### Pi is Not a Built-in Constant
+
+```fortran
+! Wrong — pi doesn't exist
+area = pi * radius**2
+
+! Correct — define it explicitly
+real(wp), parameter :: PI = 4.0_wp * atan(1.0_wp)
+area = PI * radius**2
+```
+
+### random_number is a Subroutine, Not a Function
+
+```fortran
+! Wrong — this won't compile
+x = random_number()
+
+! Correct — call it with an argument
+call random_number(x)
+```
+
+### No print/write in pure Procedures
+
+```fortran
+! Wrong — I/O is a side effect
+pure function compute(x) result(y)
+   real(wp), intent(in) :: x
+   real(wp) :: y
+   print *, "Computing..."    ! Compiler error!
+   y = x**2
+end function
+
+! Correct — pure means no side effects
+pure function compute(x) result(y)
+   real(wp), intent(in) :: x
+   real(wp) :: y
+   y = x**2
+end function
+```
+
+### Variable Declarations Must Come Before Executable Code
+
+```fortran
+! Wrong — declaration after executable statement
+subroutine foo()
+   x = 1.0
+   real(wp) :: x    ! Compiler error!
+end subroutine
+
+! Correct — declarations first
+subroutine foo()
+   real(wp) :: x
+   x = 1.0
+end subroutine
+
+! Also correct — use block for local scope
+subroutine foo()
+   call setup()
+   block
+      real(wp) :: temp    ! OK inside block
+      temp = 1.0
+   end block
+end subroutine
+```
+
+### Don't Declare Variables Twice
+
+```fortran
+! Wrong — redeclaration
+integer :: i
+integer :: i    ! Compiler error!
+
+! Also wrong — same name, different case (avoid this)
+real(wp) :: Value
+real(wp) :: value    ! Some compilers treat as same variable
+```
+
+### Array Constructors Use Square Brackets (Modern) or (/ /)
+
+```fortran
+! Modern style (Fortran 2003+)
+integer :: arr(3) = [1, 2, 3]
+
+! Old style (still valid)
+integer :: arr(3) = (/1, 2, 3/)
+
+! Wrong — parentheses alone don't work
+integer :: arr(3) = (1, 2, 3)    ! Compiler error!
+```
+
+**Note:** The literal `3` above is for illustration only. In real code, use named constants for array sizes (see "No Magic Numbers" section).
 
 ---
 
