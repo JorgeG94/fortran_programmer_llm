@@ -82,6 +82,45 @@ real(wp) :: E              ! Single letter (except loop indices)
 - Very local, obvious variables (`x`, `y`, `z` for coordinates)
 - Mathematical formulas matching published notation
 
+### Function and Subroutine Naming
+
+Use verb + noun patterns for procedures:
+
+```fortran
+! Good — verb + noun, clear action
+subroutine compute_flux(...)
+subroutine apply_boundary_conditions(...)
+function calculate_timestep(...) result(dt)
+
+! For logical returns, use is_/has_/can_ prefixes
+function is_dry(depth) result(dry)
+function has_converged(residual, tol) result(converged)
+function can_coarsen(cell) result(ok)
+
+! Bad — unclear what it does
+subroutine flux(...)           ! Noun only
+subroutine boundary(...)       ! What about the boundary?
+function timestep(...)         ! Is this getting or setting?
+```
+
+### Units in Comments
+
+For scientific code, document physical units in variable declarations:
+
+```fortran
+type :: state_t
+   real(wp) :: depth       !! Water depth [m]
+   real(wp) :: velocity_x  !! x-velocity [m/s]
+   real(wp) :: velocity_y  !! y-velocity [m/s]
+   real(wp) :: pressure    !! Pressure [Pa]
+end type
+
+real(wp), parameter :: GRAVITY = 9.81_wp      ! [m/s^2]
+real(wp), parameter :: WATER_DENSITY = 1000.0_wp  ! [kg/m^3]
+```
+
+This is especially valuable when combining quantities — makes dimensional analysis obvious.
+
 ### Constants
 
 Use UPPERCASE with underscores for parameters:
@@ -145,6 +184,29 @@ subroutine compute_flux(state, dt, flux)
    real(wp) :: dt
    real(wp) :: flux(:,:)
 ```
+
+### Functions Should Have No Side Effects
+
+Functions should be pure computations — all arguments `intent(in)`, no mutations:
+
+```fortran
+! Good — pure computation, no side effects
+function kinetic_energy(mass, velocity) result(ke)
+   real(wp), intent(in) :: mass, velocity
+   real(wp) :: ke
+   ke = 0.5_wp * mass * velocity**2
+end function
+
+! Bad — function mutates state (use a subroutine instead)
+function update_and_return_energy(state) result(energy)
+   type(state_t), intent(inout) :: state    ! Side effect!
+   real(wp) :: energy
+   state%step = state%step + 1              ! Mutation hidden in function
+   energy = compute_energy(state)
+end function
+```
+
+Use subroutines when you need to modify arguments. Functions that mutate state are surprising and error-prone.
 
 ### Private by Default
 
@@ -493,6 +555,23 @@ do i = 1, n
    end do
 end do
 ```
+
+### Labeled Loops for cycle/exit (Optional)
+
+When using `cycle` or `exit` with nested loops, labels make control flow explicit:
+
+```fortran
+outer: do i = 1, n
+   inner: do j = 1, m
+      if (found(i, j)) exit outer      ! Clear: exits the outer loop
+      if (skip_column(j)) cycle inner  ! Clear: skips to next j
+   end do inner
+end do outer
+```
+
+Without labels, `exit` and `cycle` apply to the innermost loop, which can be confusing in deeply nested code.
+
+**Style note:** Labeled loops are controversial — some programmers find them ugly and prefer restructuring the code to avoid the need for multi-level `cycle`/`exit`. However, they're useful when the alternative is convoluted logic or flag variables. Use your judgment.
 
 ### Allocatable Character Strings
 
@@ -845,6 +924,104 @@ end module module_name
 | **Memory** | `allocatable` | `pointer` (unless needed) |
 | **Output** | Logging framework | `print *` |
 | **Control** | `if/select/do` | `goto` |
+
+---
+
+## Common LLM/AI Mistakes
+
+When using AI assistants for Fortran code generation, watch for these common errors:
+
+### Pi is Not a Built-in Constant
+
+```fortran
+! Wrong — pi doesn't exist
+area = pi * radius**2
+
+! Correct — define it explicitly
+real(wp), parameter :: PI = 4.0_wp * atan(1.0_wp)
+area = PI * radius**2
+```
+
+### random_number is a Subroutine, Not a Function
+
+```fortran
+! Wrong — this won't compile
+x = random_number()
+
+! Correct — call it with an argument
+call random_number(x)
+```
+
+### No print/write in pure Procedures
+
+```fortran
+! Wrong — I/O is a side effect
+pure function compute(x) result(y)
+   real(wp), intent(in) :: x
+   real(wp) :: y
+   print *, "Computing..."    ! Compiler error!
+   y = x**2
+end function
+
+! Correct — pure means no side effects
+pure function compute(x) result(y)
+   real(wp), intent(in) :: x
+   real(wp) :: y
+   y = x**2
+end function
+```
+
+### Variable Declarations Must Come Before Executable Code
+
+```fortran
+! Wrong — declaration after executable statement
+subroutine foo()
+   x = 1.0
+   real(wp) :: x    ! Compiler error!
+end subroutine
+
+! Correct — declarations first
+subroutine foo()
+   real(wp) :: x
+   x = 1.0
+end subroutine
+
+! Also correct — use block for local scope
+subroutine foo()
+   call setup()
+   block
+      real(wp) :: temp    ! OK inside block
+      temp = 1.0
+   end block
+end subroutine
+```
+
+### Don't Declare Variables Twice
+
+```fortran
+! Wrong — redeclaration
+integer :: i
+integer :: i    ! Compiler error!
+
+! Also wrong — same name, different case (avoid this)
+real(wp) :: Value
+real(wp) :: value    ! Some compilers treat as same variable
+```
+
+### Array Constructors Use Square Brackets (Modern) or (/ /)
+
+```fortran
+! Modern style (Fortran 2003+)
+integer :: arr(3) = [1, 2, 3]
+
+! Old style (still valid)
+integer :: arr(3) = (/1, 2, 3/)
+
+! Wrong — parentheses alone don't work
+integer :: arr(3) = (1, 2, 3)    ! Compiler error!
+```
+
+**Note:** The literal `3` above is for illustration only. In real code, use named constants for array sizes (see "No Magic Numbers" section).
 
 ---
 
