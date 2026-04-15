@@ -556,6 +556,19 @@ do i = 1, n
 end do
 ```
 
+#### Avoid nested associate constructs 
+
+The following pattern can be troublesome in certain compilers, best avoid it! 
+
+```fortran
+associate(d => sin(42.0))
+    associate(g => d)
+        print *, g, g == d
+    end associate
+end associate
+end
+```
+
 ### Labeled Loops for cycle/exit (Optional)
 
 When using `cycle` or `exit` with nested loops, labels make control flow explicit:
